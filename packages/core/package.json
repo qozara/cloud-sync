@@ -1,0 +1,32 @@
+{
+  "name": "@qozara/cloud-sync",
+  "version": "1.0.0",
+  "description": "Cloud-agnostic synchronization primitives, LWW serializers, evaluator, and composite strategy.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qozara/cloud-sync.git",
+    "directory": "packages/core"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "check": "tsc --noEmit -p ../../tsconfig.json",
+    "test": "vitest run"
+  },
+  "license": "MIT"
+}
