@@ -1,6 +1,6 @@
 {
   "name": "@qozara/cloud-sync-google",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Google Drive and Google Sheets cloud synchronization drivers and provider for @qozara/cloud-sync.",
   "publishConfig": {
     "access": "public"
