@@ -395,10 +395,12 @@ describe('GoogleDriveSheetsCloudSyncProvider', () => {
       accessToken: 'initial-tok',
       userName: 'Ada',
       userEmail: 'ada@example.com',
+      userPicture: 'https://example.com/ada.png',
     });
 
     expect(provider.isInitialized()).toBe(true);
     expect(provider.getConnectedAccount()).toBe('Ada (ada@example.com)');
+    expect(provider.getUserPicture()).toBe('https://example.com/ada.png');
     expect(provider.getStatus()).toBe('idle');
 
     await provider.reauthenticate();
@@ -408,11 +410,86 @@ describe('GoogleDriveSheetsCloudSyncProvider', () => {
         accessToken: 'refreshed-tok',
         userEmail: 'ada@example.com',
         userName: 'Ada',
+        userPicture: 'https://example.com/ada.png',
       })
     );
 
     await provider.disconnect();
     expect(provider.isInitialized()).toBe(false);
     expect(provider.getConnectedAccount()).toBeNull();
+  });
+
+  it('marks status as auth_failed without unprompted popup when initialized with expired credentials, and recovers via reauthenticate()', async () => {
+    const now = 5_000_000;
+    const onTokenRefresh = vi.fn(async () => 'fresh-interactive-tok');
+    const provider = new GoogleDriveSheetsCloudSyncProvider({
+      onTokenRefresh,
+      now: () => now,
+    });
+
+    await provider.initialize({
+      accessToken: 'expired-boot-tok',
+      expiresAt: now - 1000,
+      userName: 'Grace',
+      userEmail: 'grace@example.com',
+      userPicture: 'https://example.com/grace.png',
+    });
+
+    // Must not trigger unprompted OAuth popup on boot; status reflects expired auth
+    expect(onTokenRefresh).not.toHaveBeenCalled();
+    expect(provider.getStatus()).toBe('auth_failed');
+    expect(provider.getUserPicture()).toBe('https://example.com/grace.png');
+
+    // Explicit user-initiated reauthenticate refreshes and restores idle state
+    await provider.reauthenticate();
+    expect(onTokenRefresh).toHaveBeenCalledTimes(1);
+    expect(provider.isInitialized()).toBe(true);
+    expect(provider.getStatus()).toBe('idle');
+    expect(provider.getConnectedAccount()).toBe('Grace (grace@example.com)');
+  });
+
+  it('supports external getAccessToken session store delegation and notifies listeners on refresh-based initialize', async () => {
+    let externalToken: string | null = 'session-store-token-1';
+    const fetchMock = vi.fn(async () => jsonResponse({ files: [] }));
+
+    const provider = new GoogleDriveSheetsCloudSyncProvider({
+      getAccessToken: () => externalToken,
+      httpClient: { fetch: fetchMock as unknown as typeof fetch },
+      routes: {
+        user_settings: { target: 'blob', filename: 'settings.json' },
+      },
+    });
+
+    await provider.initialize({
+      userEmail: 'session@qozara.org',
+      userName: 'Session User',
+    });
+
+    expect(provider.isInitialized()).toBe(true);
+    expect(provider.getStatus()).toBe('idle');
+    expect(provider.getConnectedAccount()).toBe('Session User (session@qozara.org)');
+
+    await provider.pull();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('spaces=appDataFolder'),
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer session-store-token-1' },
+      })
+    );
+
+    // Updating external session token immediately reflects on next sync without re-initializing
+    externalToken = 'session-store-token-2';
+    fetchMock.mockClear();
+    await provider.pull();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('spaces=appDataFolder'),
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer session-store-token-2' },
+      })
+    );
+
+    // Expiring external session token reflects in isInitialized()
+    externalToken = null;
+    expect(provider.isInitialized()).toBe(false);
   });
 });
