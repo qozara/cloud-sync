@@ -30,7 +30,9 @@ export interface GoogleDriveSheetsCloudSyncProviderOptions {
   filterPulledTabularDoc?: CompositeCloudSyncProviderOptions['filterPulledTabularDoc'];
   mergeBlobPush?: CompositeCloudSyncProviderOptions['mergeBlobPush'];
   normalizeBlobDoc?: CompositeCloudSyncProviderOptions['normalizeBlobDoc'];
+  getAccessToken?: () => string | null;
   onTokenRefresh?: () => Promise<string>;
+  now?: () => number;
 }
 
 export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvider {
@@ -39,21 +41,23 @@ export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvid
   protected userName: string | null = null;
   protected userPicture: string | null = null;
   protected httpClient?: GoogleHttpClient;
+  protected externalGetAccessToken?: () => string | null;
   protected onTokenRefresh?: () => Promise<string>;
+  protected now: () => number;
 
   constructor(options?: GoogleDriveSheetsCloudSyncProviderOptions) {
     const httpClient = options?.httpClient;
-    let getAccessToken = (): string | null => null;
+    let resolveToken = (): string | null => null;
 
     const blobDriver = new GoogleDriveBlobDriver({
       ...options?.blobDriverOptions,
-      getAccessToken: () => getAccessToken(),
+      getAccessToken: () => resolveToken(),
       httpClient: options?.blobDriverOptions?.httpClient ?? httpClient,
     });
 
     const tabularDriver = new GoogleSheetsTabularDriver({
       ...options?.tabularDriverOptions,
-      getAccessToken: () => getAccessToken(),
+      getAccessToken: () => resolveToken(),
       httpClient: options?.tabularDriverOptions?.httpClient ?? httpClient,
     });
 
@@ -74,12 +78,25 @@ export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvid
     });
 
     this.httpClient = httpClient;
+    this.externalGetAccessToken = options?.getAccessToken;
     this.onTokenRefresh = options?.onTokenRefresh;
-    getAccessToken = () => this.accessToken;
+    this.now = options?.now ?? (() => Date.now());
+    resolveToken = () => this.getEffectiveAccessToken();
+  }
+
+  protected getEffectiveAccessToken(): string | null {
+    if (this.externalGetAccessToken) {
+      const ext = this.externalGetAccessToken();
+      if (ext && ext.trim()) {
+        return ext.trim();
+      }
+      return this.accessToken;
+    }
+    return this.accessToken;
   }
 
   override isInitialized(): boolean {
-    return this.initialized && Boolean(this.accessToken);
+    return this.initialized && Boolean(this.getEffectiveAccessToken());
   }
 
   override getConnectedAccount(): string | null {
@@ -101,33 +118,64 @@ export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvid
   }
 
   override async initialize(credentials?: string | Record<string, any>): Promise<void> {
+    let hadExpiredProvidedCredentials = false;
+
     if (typeof credentials === 'string') {
-      this.accessToken = credentials;
+      this.accessToken = credentials.trim() || null;
       this.userEmail = null;
       this.userName = null;
       this.userPicture = null;
     } else if (credentials && typeof credentials === 'object') {
-      if (credentials.accessToken) {
-        this.accessToken = credentials.accessToken;
-      }
       this.userEmail = credentials.userEmail || null;
       this.userName = credentials.userName || null;
       this.userPicture = credentials.userPicture || null;
       if (credentials.httpClient) {
         this.httpClient = credentials.httpClient;
       }
+
+      const isProvidedTokenExpired =
+        typeof credentials.expiresAt === 'number' &&
+        Number.isFinite(credentials.expiresAt) &&
+        credentials.expiresAt <= this.now();
+
+      if (isProvidedTokenExpired) {
+        this.accessToken = null;
+        hadExpiredProvidedCredentials = true;
+      } else if (typeof credentials.accessToken === 'string' && credentials.accessToken.trim()) {
+        this.accessToken = credentials.accessToken.trim();
+      }
     }
 
-    if (this.accessToken) {
+    const activeToken = this.getEffectiveAccessToken();
+    if (activeToken) {
       this.initialized = true;
-      this.lastSyncedTime = new Date().toISOString();
+      this.lastSyncedTime = new Date(this.now()).toISOString();
       this.setStatus('idle');
-    } else if (this.onTokenRefresh) {
+      return;
+    }
+
+    // If initialized on boot with expired persisted credentials, do not trigger an unprompted popup;
+    // preserve profile state and report 'auth_failed' so the user can reconnect interactively.
+    if (hadExpiredProvidedCredentials) {
+      this.initialized = true;
+      this.setStatus('auth_failed');
+      return;
+    }
+
+    if (this.onTokenRefresh) {
       try {
-        this.accessToken = await this.onTokenRefresh();
+        const refreshed = await this.onTokenRefresh();
+        this.accessToken = refreshed;
         this.initialized = true;
-        this.lastSyncedTime = new Date().toISOString();
+        this.lastSyncedTime = new Date(this.now()).toISOString();
         this.setStatus('idle');
+        this.notifyCredentialsChange({
+          accessToken: refreshed,
+          userEmail: this.userEmail,
+          userName: this.userName,
+          ...(this.userPicture ? { userPicture: this.userPicture } : {}),
+          expiresAt: this.now() + 3500000,
+        });
       } catch {
         this.initialized = false;
         this.setStatus('auth_failed');
@@ -151,13 +199,15 @@ export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvid
       try {
         const newToken = await this.onTokenRefresh();
         this.accessToken = newToken;
+        this.initialized = true;
         this.setStatus('idle');
-        this.lastSyncedTime = new Date().toISOString();
+        this.lastSyncedTime = new Date(this.now()).toISOString();
         this.notifyCredentialsChange({
           accessToken: newToken,
           userEmail: this.userEmail,
           userName: this.userName,
-          expiresAt: Date.now() + 3500000,
+          ...(this.userPicture ? { userPicture: this.userPicture } : {}),
+          expiresAt: this.now() + 3500000,
         });
         return;
       } catch {
@@ -166,9 +216,10 @@ export class GoogleDriveSheetsCloudSyncProvider extends CompositeCloudSyncProvid
       }
     }
 
-    if (this.accessToken) {
+    if (this.getEffectiveAccessToken()) {
+      this.initialized = true;
       this.setStatus('idle');
-      this.lastSyncedTime = new Date().toISOString();
+      this.lastSyncedTime = new Date(this.now()).toISOString();
     } else {
       this.setStatus('auth_failed');
     }
