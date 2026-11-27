@@ -8,6 +8,8 @@ export type SyncStatus =
   | 'corrupted'
   | 'upgrade_required'
   | 'incompatible'
+  | 'unmanaged'
+  | 'foreign_app'
   | 'error';
 
 export type UXSyncState =
@@ -67,6 +69,7 @@ export interface TabularStorageDriver {
     expectedLastModified?: string
   ): Promise<void>;
   migrateTable?(documentId: string, expectedLastModified?: string): Promise<void>;
+  healForkedCopy?(documentId: string): Promise<void>;
   checkHealth?(documentId: string): Promise<any>;
   getRemoteLinks?(): Promise<string[]>;
 }
@@ -85,7 +88,7 @@ export type CollectionRoute =
 
 export interface CollectionSerializer {
   headers: string[];
-  docToRow(doc: Record<string, any>): TabularRow;
+  docToRow(doc: Record<string, any>, headers?: string[]): TabularRow;
   rowToDoc(row: TabularRow): Record<string, any>;
 }
 

@@ -1,4 +1,9 @@
-import { GroupFileUnavailableError, TableNotFoundError } from './errors.js';
+import {
+  ForeignDocumentError,
+  GroupFileUnavailableError,
+  TableNotFoundError,
+  UnmanagedDocumentError,
+} from './errors.js';
 import {
   isEntityNotFoundError,
   isNetworkError,
@@ -37,6 +42,7 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
   protected lastPulledUserSettingsUpdatedAt: string | null = null;
   protected documentIdCache: Map<string, string> = new Map();
   protected tabularCache: Map<string, Record<string, any>[]> = new Map();
+  protected tabularHeadersCache: Map<string, string[]> = new Map();
   protected serializers: Record<string, CollectionSerializer>;
   protected groupSerializers: Record<string, GroupTabularSerializer>;
   protected normalizeBlobDoc?: (collection: string, raw: any) => Record<string, any>;
@@ -167,6 +173,7 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
     this.initialized = false;
     this.documentIdCache.clear();
     this.tabularCache.clear();
+    this.tabularHeadersCache.clear();
     this.setStatus('disconnected');
   }
 
@@ -254,7 +261,13 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
     missingColumns?: Record<string, string[]>;
     missingTabs?: string[];
   } | null> {
-    if (this.status !== 'corrupted' && this.status !== 'upgrade_required') {
+    if (
+      this.status !== 'corrupted' &&
+      this.status !== 'upgrade_required' &&
+      this.status !== 'unmanaged' &&
+      this.status !== 'foreign_app' &&
+      this.status !== 'incompatible'
+    ) {
       return null;
     }
     if (!this.tabularDriver?.checkHealth) {
@@ -306,11 +319,27 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           'Sync suspended: remote spreadsheet schema requires upgrade. Please migrate the spreadsheet before syncing.'
         );
       }
+      if (this.status === 'unmanaged') {
+        throw new UnmanagedDocumentError(
+          undefined,
+          'Sync suspended: remote spreadsheet is not managed by this application (missing _meta manifest).'
+        );
+      }
+      if (this.status === 'foreign_app') {
+        throw new ForeignDocumentError(
+          undefined,
+          undefined,
+          undefined,
+          'Sync suspended: remote spreadsheet belongs to another application.'
+        );
+      }
     } else if (
       payload.collection !== 'user_settings' &&
       (this.status === 'upgrade_required' ||
         this.status === 'corrupted' ||
-        this.status === 'incompatible')
+        this.status === 'incompatible' ||
+        this.status === 'unmanaged' ||
+        this.status === 'foreign_app')
     ) {
       return;
     }
@@ -406,6 +435,9 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           } else {
             try {
               const existingRows = await this.tabularDriver.readTable(docId, route.tabName);
+              if (existingRows[0]?.headers?.length) {
+                this.tabularHeadersCache.set(cacheKey, existingRows[0].headers);
+              }
               existingDocs = existingRows.map((r) => serializer.rowToDoc(r));
             } catch (err: any) {
               if (
@@ -443,9 +475,10 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           const mergedDocs = Array.from(docMap.values());
           this.tabularCache.set(cacheKey, mergedDocs);
 
-          const rows = mergedDocs.map((doc) => serializer.docToRow(doc));
+          const liveHeaders = this.tabularHeadersCache.get(cacheKey) || serializer.headers;
+          const rows = mergedDocs.map((doc) => serializer.docToRow(doc, liveHeaders));
           try {
-            await this.tabularDriver.writeTable(docId, route.tabName, serializer.headers, rows);
+            await this.tabularDriver.writeTable(docId, route.tabName, liveHeaders, rows);
           } catch (writeErr: any) {
             if (isEntityNotFoundError(writeErr)) {
               this.invalidateDocument(route.documentKey, docId);
@@ -456,11 +489,13 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
               );
               const freshCacheKey = `${freshDocId}_${route.tabName}`;
               this.tabularCache.set(freshCacheKey, mergedDocs);
+              const freshHeaders = this.tabularHeadersCache.get(freshCacheKey) || serializer.headers;
+              const freshRows = mergedDocs.map((doc) => serializer.docToRow(doc, freshHeaders));
               await this.tabularDriver.writeTable(
                 freshDocId,
                 route.tabName,
-                serializer.headers,
-                rows
+                freshHeaders,
+                freshRows
               );
             } else {
               throw writeErr;
@@ -542,7 +577,9 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
         !docKeyMode &&
         (prevStatus === 'upgrade_required' ||
           prevStatus === 'corrupted' ||
-          prevStatus === 'incompatible')
+          prevStatus === 'incompatible' ||
+          prevStatus === 'unmanaged' ||
+          prevStatus === 'foreign_app')
       ) {
         this.setStatus(prevStatus);
       } else {
@@ -569,10 +606,25 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           'Sync suspended: remote spreadsheet schema requires upgrade. Please migrate the spreadsheet before syncing.'
         );
       }
+      if (this.status === 'unmanaged') {
+        throw new UnmanagedDocumentError(
+          undefined,
+          'Sync suspended: remote spreadsheet is not managed by this application (missing _meta manifest).'
+        );
+      }
+      if (this.status === 'foreign_app') {
+        throw new ForeignDocumentError(
+          undefined,
+          undefined,
+          undefined,
+          'Sync suspended: remote spreadsheet belongs to another application.'
+        );
+      }
 
       this.setStatus('syncing');
       try {
         const results: SyncDeltaPayload[] = [];
+        const checkedDocIds = new Set<string>();
         for (const [collection, route] of Object.entries(this.routes)) {
           if (route.target === 'blob' && this.blobDriver) {
             const docs = await this.blobDriver.readBlob<Record<string, any>[]>(route.filename);
@@ -587,6 +639,33 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
                   route.documentKey,
                   route.documentTitle || route.documentKey
                 );
+                if (
+                  typeof this.tabularDriver.checkHealth === 'function' &&
+                  !checkedDocIds.has(docId)
+                ) {
+                  checkedDocIds.add(docId);
+                  const health = await this.tabularDriver.checkHealth(docId);
+                  if (health?.status === 'UPGRADE_REQUIRED') {
+                    this.setStatus('upgrade_required');
+                    return results;
+                  }
+                  if (health?.status === 'INCOMPATIBLE') {
+                    this.setStatus('incompatible');
+                    return results;
+                  }
+                  if (health?.status === 'CORRUPTED') {
+                    this.setStatus('corrupted');
+                    return results;
+                  }
+                  if (health?.status === 'UNMANAGED') {
+                    this.setStatus('unmanaged');
+                    return results;
+                  }
+                  if (health?.status === 'FOREIGN_APP') {
+                    this.setStatus('foreign_app');
+                    return results;
+                  }
+                }
                 let rows: TabularRow[];
                 try {
                   rows = await this.tabularDriver.readTable(docId, route.tabName);
@@ -603,14 +682,21 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
                     throw readErr;
                   }
                 }
-                const documents = rows.map((r) => serializer.rowToDoc(r));
                 const cacheKey = `${docId}_${route.tabName}`;
+                if (rows[0]?.headers?.length) {
+                  this.tabularHeadersCache.set(cacheKey, rows[0].headers);
+                }
+                const documents = rows.map((r) => serializer.rowToDoc(r));
                 this.tabularCache.set(cacheKey, documents);
                 results.push({ collection, documents });
               } catch (tabErr: any) {
                 if (
                   tabErr?.message?.includes('corruption') ||
-                  tabErr?.message?.includes('missing required column')
+                  tabErr?.message?.includes('missing required column') ||
+                  tabErr instanceof UnmanagedDocumentError ||
+                  tabErr?.name === 'UnmanagedDocumentError' ||
+                  tabErr instanceof ForeignDocumentError ||
+                  tabErr?.name === 'ForeignDocumentError'
                 ) {
                   throw tabErr;
                 }
@@ -682,6 +768,14 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           this.setStatus('corrupted');
           return results;
         }
+        if (health?.status === 'UNMANAGED') {
+          this.setStatus('unmanaged');
+          return results;
+        }
+        if (health?.status === 'FOREIGN_APP') {
+          this.setStatus('foreign_app');
+          return results;
+        }
       } catch (healthErr: any) {
         const healthMsg = String(healthErr?.message || healthErr).toLowerCase();
         if (
@@ -696,6 +790,14 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
             undefined,
             healthMsg.includes('trash') ? 'trashed' : 'deleted'
           );
+        }
+        if (healthErr?.name === 'ForeignDocumentError') {
+          this.setStatus('foreign_app');
+          return results;
+        }
+        if (healthErr?.name === 'UnmanagedDocumentError') {
+          this.setStatus('unmanaged');
+          return results;
         }
         if (healthErr?.name === 'SchemaIncompatibleError') {
           this.setStatus('incompatible');
@@ -772,6 +874,11 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
           this.tabularCache.delete(key);
         }
       }
+      for (const key of Array.from(this.tabularHeadersCache.keys())) {
+        if (key.startsWith(`${staleDocId}_`)) {
+          this.tabularHeadersCache.delete(key);
+        }
+      }
     }
   }
 
@@ -804,6 +911,14 @@ export class CompositeCloudSyncProvider implements CloudSyncProvider {
       (err instanceof GroupFileUnavailableError || err?.name === 'GroupFileUnavailableError')
     ) {
       this.setStatus('idle', err);
+      return;
+    }
+    if (err instanceof ForeignDocumentError || err?.name === 'ForeignDocumentError') {
+      this.setStatus('foreign_app', err);
+      return;
+    }
+    if (err instanceof UnmanagedDocumentError || err?.name === 'UnmanagedDocumentError') {
+      this.setStatus('unmanaged', err);
       return;
     }
     if (err?.name === 'SchemaIncompatibleError' || (!docKeyMode && msg.includes('incompatible'))) {

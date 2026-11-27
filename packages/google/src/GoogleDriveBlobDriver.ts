@@ -1,5 +1,6 @@
 import type { BlobStorageDriver } from '@qozara/cloud-sync';
-import type { GoogleDriverOptions, GoogleHttpClient, IStorageLayer } from '@qozara/gdocs-schema';
+import type { GoogleDriverOptions, GoogleHttpClient } from './googleTypes.js';
+import type { IStorageLayer } from './IStorageLayer.js';
 
 export interface GoogleDriveBlobDriverOptions extends GoogleDriverOptions {
   enableLegacyRootMigration?: boolean;

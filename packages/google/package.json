@@ -1,6 +1,6 @@
 {
   "name": "@qozara/cloud-sync-google",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Google Drive and Google Sheets cloud synchronization drivers and provider for @qozara/cloud-sync.",
   "publishConfig": {
     "access": "public"
@@ -29,8 +29,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@qozara/cloud-sync": "^1.0.0",
-    "@qozara/gdocs-schema": "^1.3.0"
+    "@qozara/cloud-sync": "^2.0.0"
   },
   "license": "MIT"
 }

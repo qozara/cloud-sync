@@ -7,7 +7,7 @@ import {
   type GroupAccessMode,
   type GroupCollaborator,
 } from '@qozara/cloud-sync';
-import type { IStorageLayer } from '@qozara/gdocs-schema';
+import type { IStorageLayer } from './IStorageLayer.js';
 
 export interface StorageLayerCatalogAndAclOptions {
   currentUserEmail?: string;
