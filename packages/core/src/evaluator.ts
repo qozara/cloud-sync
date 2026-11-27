@@ -23,6 +23,8 @@ export type ProviderDiagnosticKey =
   | 'corrupted'
   | 'upgrade_required'
   | 'incompatible'
+  | 'unmanaged'
+  | 'foreign_app'
   | 'error'
   | 'disconnected';
 
@@ -76,7 +78,9 @@ export function resolveUXStatus(params: ResolveUXStatusParams): UXSyncState {
     status === 'error' ||
     status === 'corrupted' ||
     status === 'upgrade_required' ||
-    status === 'incompatible'
+    status === 'incompatible' ||
+    status === 'unmanaged' ||
+    status === 'foreign_app'
   ) {
     return 'error';
   }
@@ -127,6 +131,8 @@ export function resolveProviderDiagnostic(
       providerStatus === 'corrupted' ||
       providerStatus === 'upgrade_required' ||
       providerStatus === 'incompatible' ||
+      providerStatus === 'unmanaged' ||
+      providerStatus === 'foreign_app' ||
       providerStatus === 'error'
     ) {
       return providerStatus;
