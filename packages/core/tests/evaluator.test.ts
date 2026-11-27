@@ -17,6 +17,8 @@ describe('resolveUXStatus & resolveProviderDiagnostic', () => {
     expect(resolveUXStatus({ isOnline: true, adapterStatus: 'corrupted' })).toBe('error');
     expect(resolveUXStatus({ isOnline: true, adapterStatus: 'upgrade_required' })).toBe('error');
     expect(resolveUXStatus({ isOnline: true, providerConnected: true, providerStatus: 'incompatible' })).toBe('error');
+    expect(resolveUXStatus({ isOnline: true, providerConnected: true, providerStatus: 'unmanaged' })).toBe('error');
+    expect(resolveUXStatus({ isOnline: true, providerConnected: true, providerStatus: 'foreign_app' })).toBe('error');
 
     expect(resolveUXStatus({ isOnline: true, adapterStatus: 'idle' })).toBe('idle');
     expect(resolveUXStatus({ isOnline: true, providerConnected: true, providerStatus: 'synced' })).toBe('idle');
@@ -50,6 +52,8 @@ describe('resolveUXStatus & resolveProviderDiagnostic', () => {
     expect(resolveProviderDiagnostic(true, true, 'syncing')).toBe('syncing');
     expect(resolveProviderDiagnostic(true, true, 'auth_failed')).toBe('auth_failed');
     expect(resolveProviderDiagnostic(true, true, 'incompatible')).toBe('incompatible');
+    expect(resolveProviderDiagnostic(true, true, 'unmanaged')).toBe('unmanaged');
+    expect(resolveProviderDiagnostic(true, true, 'foreign_app')).toBe('foreign_app');
     expect(resolveProviderDiagnostic(true, true, 'idle')).toBe('synced');
   });
 });
