@@ -6,7 +6,7 @@ import {
   type GroupTabularSerializer,
   type SyncDeltaPayload,
 } from '@qozara/cloud-sync';
-import type { GoogleHttpClient } from '@qozara/gdocs-schema';
+import type { GoogleHttpClient } from './googleTypes.js';
 import {
   GoogleDriveBlobDriver,
   type GoogleDriveBlobDriverOptions,

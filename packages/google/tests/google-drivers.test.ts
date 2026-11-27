@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { TableNotFoundError } from '@qozara/cloud-sync';
+import { TableNotFoundError, MANIFEST_KEYS } from '@qozara/cloud-sync';
 import {
   ConflictError,
   ValidationService,
@@ -21,6 +21,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 const sampleSchema: SchemaDefinition = {
   version: 2,
+  identity: {
+    appId: 'testapp',
+    docType: 'items',
+  },
   tabs: [
     {
       name: 'items',
@@ -32,7 +36,7 @@ const sampleSchema: SchemaDefinition = {
   ],
 };
 
-describe('ValidationService', () => {
+describe('ValidationService (unified SchemaEngine)', () => {
   it('enforces requireTokenOnConstruct when true and allows lazy init by default', () => {
     expect(() => new ValidationService(() => null, { requireTokenOnConstruct: true })).toThrow(
       'requires a valid Google access token'
@@ -40,27 +44,39 @@ describe('ValidationService', () => {
     expect(() => new ValidationService(() => null)).not.toThrow();
   });
 
-  it('checkHealth returns READY when spreadsheet matches default schema', async () => {
+  it('checkHealth returns READY when spreadsheet has valid _meta manifest and matches schema', async () => {
     const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes('fields=appProperties,modifiedTime')) {
+      if (url.includes('drive/v3/files/sheet-1')) {
         return jsonResponse({
+          properties: { qozara_app: 'testapp', qozara_doc_type: 'items' },
           appProperties: { app_schema_version: '2' },
           modifiedTime: '2026-11-10T10:00:00.000Z',
         });
       }
       if (url.includes('values:batchGet')) {
-        if (url.includes('_migrations')) {
-          return jsonResponse({
-            valueRanges: [{ values: [['2', '2026-11-09T00:00:00Z']] }],
-          });
-        }
         return jsonResponse({
-          valueRanges: [{ values: [['id', 'title']] }],
+          valueRanges: [
+            {
+              values: [
+                ['key', 'value', 'updatedAt'],
+                [MANIFEST_KEYS.APP_ID, 'testapp', '2026-11-09T00:00:00Z'],
+                [MANIFEST_KEYS.DOC_TYPE, 'items', '2026-11-09T00:00:00Z'],
+                [MANIFEST_KEYS.SCHEMA_VERSION, '2', '2026-11-09T00:00:00Z'],
+              ],
+            },
+            { values: [['2', '2026-11-09T00:00:00Z']] },
+            { values: [['id', 'title']] },
+          ],
         });
       }
-      if (url.includes('sheets.googleapis.com/v4/spreadsheets/sheet-1') && !url.includes('values')) {
+      if (url.includes('sheets.googleapis.com/v4/spreadsheets/sheet-1')) {
         return jsonResponse({
-          sheets: [{ properties: { title: 'items', sheetId: 1 } }],
+          properties: { title: 'Test Items' },
+          sheets: [
+            { properties: { title: '_meta', sheetId: 100 } },
+            { properties: { title: '_migrations', sheetId: 101 } },
+            { properties: { title: 'items', sheetId: 1 } },
+          ],
         });
       }
       return jsonResponse({});
@@ -79,34 +95,13 @@ describe('ValidationService', () => {
     expect(res.lastModifiedTime).toBe('2026-11-10T10:00:00.000Z');
   });
 
-  it('checkHealth delegates to SchemaEngine when useSchemaEngine is true', async () => {
-    const service = new ValidationService(() => 'tok-1', {
-      useSchemaEngine: true,
-      defaultSchema: sampleSchema,
-    });
-
-    const engineSpy = vi.spyOn(service.engine, 'checkHealth').mockResolvedValue({
-      spreadsheetId: 'sheet-2',
-      currentVersion: 2,
-      latestVersion: 2,
-      status: ValidationStatus.READY,
-      missingTabs: [],
-      missingColumns: {},
-      canAutoMigrate: false,
-      lastModifiedTime: '2026-11-12T00:00:00.000Z',
-    });
-
-    const res = await service.checkHealth('sheet-2');
-    expect(engineSpy).toHaveBeenCalledWith('sheet-2', sampleSchema);
-    expect(res.valid).toBe(true);
-    expect(res.status).toBe(ValidationStatus.READY);
-  });
-
-  it('repairFile adds missing tabs/columns and throws ConflictError on stale modifiedTime', async () => {
+  it('repairFile adds missing columns on managed sheet and throws ConflictError on stale modifiedTime', async () => {
     const batchUpdates: unknown[] = [];
+    let repaired = false;
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.includes('fields=appProperties,modifiedTime')) {
+      if (url.includes('drive/v3/files/sheet-1') && (!init?.method || init.method === 'GET')) {
         return jsonResponse({
+          properties: { qozara_app: 'testapp', qozara_doc_type: 'items' },
           appProperties: { app_schema_version: '2' },
           modifiedTime: '2026-11-12T12:00:00.000Z',
         });
@@ -115,17 +110,54 @@ describe('ValidationService', () => {
         return jsonResponse({ id: 'backup-1' });
       }
       if (url.endsWith(':batchUpdate')) {
-        batchUpdates.push(JSON.parse(String(init?.body || '{}')));
+        const parsed = JSON.parse(String(init?.body || '{}'));
+        batchUpdates.push(parsed);
+        if (parsed.requests?.some((r: any) => r.appendDimension)) {
+          repaired = true;
+        }
         return jsonResponse({});
       }
       if (url.includes('values:batchGet')) {
+        if (url.includes('items') && url.includes('_meta')) {
+          return jsonResponse({
+            valueRanges: [
+              {
+                values: [
+                  ['key', 'value', 'updatedAt'],
+                  [MANIFEST_KEYS.APP_ID, 'testapp', '2026-11-12T00:00:00Z'],
+                  [MANIFEST_KEYS.DOC_TYPE, 'items', '2026-11-12T00:00:00Z'],
+                  [MANIFEST_KEYS.SCHEMA_VERSION, '2', '2026-11-12T00:00:00Z'],
+                ],
+              },
+              { values: [['2', '2026-11-12T00:00:00Z']] },
+              { values: [repaired ? ['id', 'title'] : ['id']] },
+            ],
+          });
+        }
+        if (url.includes('_meta')) {
+          return jsonResponse({
+            valueRanges: [
+              {
+                values: [
+                  ['key', 'value', 'updatedAt'],
+                  [MANIFEST_KEYS.APP_ID, 'testapp', '2026-11-12T00:00:00Z'],
+                ],
+              },
+            ],
+          });
+        }
         return jsonResponse({
-          valueRanges: [{ values: [['id']] }],
+          valueRanges: [{ values: [repaired ? ['id', 'title'] : ['id']] }],
         });
       }
       if (url.includes('spreadsheets/sheet-1') && (!init?.method || init.method === 'GET')) {
         return jsonResponse({
-          sheets: [{ properties: { title: 'items', sheetId: 10 } }],
+          properties: { title: 'Test Items' },
+          sheets: [
+            { properties: { title: '_meta', sheetId: 100 } },
+            { properties: { title: '_migrations', sheetId: 101 } },
+            { properties: { title: 'items', sheetId: 10 } },
+          ],
         });
       }
       if (url.includes('files/sheet-1') && init?.method === 'PATCH') {
@@ -149,7 +181,7 @@ describe('ValidationService', () => {
     expect(batchUpdates.length).toBeGreaterThan(0);
   });
 
-  it('migrateFile runs migrations and updates file metadata', async () => {
+  it('migrateFile runs migrations, stamps _meta, and updates file metadata', async () => {
     const migrationUp = vi.fn(async () => {});
     const service = new ValidationService(() => 'tok-1', {
       defaultSchema: sampleSchema,
@@ -160,23 +192,47 @@ describe('ValidationService', () => {
     vi.spyOn(service.client, 'createBackup').mockResolvedValue('backup-mig-1');
     vi.spyOn(service.client, 'acquireLock').mockResolvedValue(true);
     vi.spyOn(service.client, 'releaseLock').mockResolvedValue(true);
-    vi.spyOn(service.client, 'getSpreadsheet').mockResolvedValue({
-      sheets: [{ properties: { title: '_migrations', sheetId: 99 } }],
+    vi.spyOn(service.client, 'deleteFile').mockResolvedValue();
+    vi.spyOn(service.client, 'getFileMetadata').mockResolvedValue({
+      properties: { qozara_app: 'testapp', qozara_doc_type: 'items' },
+      appProperties: {},
+      modifiedTime: '2026-11-10T00:00:00.000Z',
+    });
+    vi.spyOn(service.client, 'getSpreadsheetMetadata').mockResolvedValue({
+      properties: { title: 'Test Items' },
+      sheets: [
+        { properties: { title: '_meta', sheetId: 98 } },
+        { properties: { title: '_migrations', sheetId: 99 } },
+        { properties: { title: 'items', sheetId: 1 } },
+      ],
     });
     vi.spyOn(service.client, 'batchGet').mockResolvedValue({
-      valueRanges: [{ values: [['1', '2026-11-01T00:00:00Z']] }],
+      valueRanges: [
+        {
+          values: [
+            ['key', 'value', 'updatedAt'],
+            [MANIFEST_KEYS.APP_ID, 'testapp', '2026-11-01T00:00:00Z'],
+            [MANIFEST_KEYS.DOC_TYPE, 'items', '2026-11-01T00:00:00Z'],
+          ],
+        },
+        { values: [['1', '2026-11-01T00:00:00Z']] },
+        { values: [['id', 'title']] },
+      ],
     });
     vi.spyOn(service.client, 'batchUpdate').mockResolvedValue({});
-    const updateMetaSpy = vi.spyOn(service.client, 'updateFileAppProperties').mockResolvedValue();
+    vi.spyOn(service.client, 'batchUpdateValues').mockResolvedValue({});
+    const updatePropsSpy = vi.spyOn(service.client, 'updateFileProperties').mockResolvedValue();
 
     const res = await service.migrateFile('sheet-m');
     expect(res.backupFileId).toBe('backup-mig-1');
     expect(migrationUp).toHaveBeenCalledTimes(1);
-    expect(updateMetaSpy).toHaveBeenCalledWith(
+    expect(updatePropsSpy).toHaveBeenCalledWith(
       'sheet-m',
       expect.objectContaining({
-        app_validation_status: ValidationStatus.READY,
-        app_schema_version: '2',
+        appProperties: expect.objectContaining({
+          app_validation_status: ValidationStatus.READY,
+          app_schema_version: '2',
+        }),
       })
     );
   });
@@ -435,12 +491,10 @@ describe('GoogleDriveSheetsCloudSyncProvider', () => {
       userPicture: 'https://example.com/grace.png',
     });
 
-    // Must not trigger unprompted OAuth popup on boot; status reflects expired auth
     expect(onTokenRefresh).not.toHaveBeenCalled();
     expect(provider.getStatus()).toBe('auth_failed');
     expect(provider.getUserPicture()).toBe('https://example.com/grace.png');
 
-    // Explicit user-initiated reauthenticate refreshes and restores idle state
     await provider.reauthenticate();
     expect(onTokenRefresh).toHaveBeenCalledTimes(1);
     expect(provider.isInitialized()).toBe(true);
@@ -477,7 +531,6 @@ describe('GoogleDriveSheetsCloudSyncProvider', () => {
       })
     );
 
-    // Updating external session token immediately reflects on next sync without re-initializing
     externalToken = 'session-store-token-2';
     fetchMock.mockClear();
     await provider.pull();
@@ -488,7 +541,6 @@ describe('GoogleDriveSheetsCloudSyncProvider', () => {
       })
     );
 
-    // Expiring external session token reflects in isInitialized()
     externalToken = null;
     expect(provider.isInitialized()).toBe(false);
   });

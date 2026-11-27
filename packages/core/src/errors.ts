@@ -40,6 +40,33 @@ export class SchemaIncompatibleError extends Error {
   }
 }
 
+export class UnmanagedDocumentError extends Error {
+  constructor(
+    public readonly containerId?: string,
+    message = 'This spreadsheet does not contain a valid application _meta manifest and cannot be modified.'
+  ) {
+    super(message);
+    this.name = 'UnmanagedDocumentError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export class ForeignDocumentError extends Error {
+  constructor(
+    public readonly expectedAppId?: string,
+    public readonly detectedAppId?: string,
+    public readonly detectedDocType?: string,
+    message?: string
+  ) {
+    super(
+      message ||
+        `This spreadsheet belongs to another application (${detectedAppId || 'unknown'}${detectedDocType ? `:${detectedDocType}` : ''}) and cannot be opened here.`
+    );
+    this.name = 'ForeignDocumentError';
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export class TableNotFoundError extends Error {
   constructor(
     public readonly tabName: string,

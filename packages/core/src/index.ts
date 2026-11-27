@@ -5,3 +5,4 @@ export * from './evaluator.js';
 export * from './reconciler.js';
 export * from './CompositeCloudSyncProvider.js';
 export * from './MockCloudSyncProvider.js';
+export * from './schema/index.js';
